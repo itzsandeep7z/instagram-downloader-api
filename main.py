@@ -23,7 +23,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
