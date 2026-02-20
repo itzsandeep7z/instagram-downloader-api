@@ -6,6 +6,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -30,6 +31,12 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 class DownloadRequest(BaseModel):
     url: str = Field(..., description="Instagram reel/post URL")
+
+
+def _normalize_instagram_input(raw_url: str) -> str:
+    candidate = unquote(raw_url.strip())
+    match = re.search(r"https?://(?:www\.)?instagram\.com/[^\s]+", candidate, re.IGNORECASE)
+    return match.group(0) if match else candidate
 
 
 def _is_valid_instagram_url(url: str) -> bool:
@@ -69,7 +76,10 @@ def _download_instagram_media(url: str) -> tuple[Path, str]:
 
 
 @app.get("/")
-def root() -> JSONResponse:
+async def root(url: str | None = Query(default=None, description="Instagram reel/post URL")):
+    if url:
+        return await _download_and_respond(url)
+
     return JSONResponse(
         {
             "service": APP_NAME,
@@ -81,17 +91,19 @@ def root() -> JSONResponse:
 
 
 async def _download_and_respond(url: str) -> FileResponse:
+    normalized_url = _normalize_instagram_input(url)
+
     if yt_dlp is None:
         raise HTTPException(
             status_code=500,
             detail=f"yt-dlp is not installed. Import error: {YTDLP_IMPORT_ERROR}",
         )
 
-    if not _is_valid_instagram_url(url):
+    if not _is_valid_instagram_url(normalized_url):
         raise HTTPException(status_code=400, detail="Invalid Instagram URL.")
 
     try:
-        file_path, download_name = await asyncio.to_thread(_download_instagram_media, url)
+        file_path, download_name = await asyncio.to_thread(_download_instagram_media, normalized_url)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Failed to download media: {exc}") from exc
 
