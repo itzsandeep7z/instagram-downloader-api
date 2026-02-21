@@ -23,7 +23,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -48,8 +48,7 @@ def _download_instagram_media(url: str) -> tuple[Path, str]:
 
     ydl_opts: dict[str, Any] = {
         "outtmpl": str(temp_dir / "%(id)s.%(ext)s"),
-        "format": "bestvideo*+bestaudio/best",
-        "merge_output_format": "mp4",
+        "format": "best[ext=mp4]/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
