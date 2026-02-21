@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -23,7 +23,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -138,6 +138,21 @@ async def download_instagram_media_get(url: str = Query(..., description="Instag
 @app.get("/health")
 def health() -> JSONResponse:
     return JSONResponse({"status": "healthy", "developer": DEVELOPER_TAG})
+
+
+@app.get("/{target:path}")
+async def download_instagram_media_direct_path(target: str, request: Request):
+    raw_target = unquote(target.strip())
+    if raw_target.startswith(("http://", "https://")):
+        direct_url = raw_target
+    else:
+        direct_url = f"https://{raw_target}"
+
+    query_text = request.url.query
+    if query_text and "?" not in direct_url:
+        direct_url = f"{direct_url}?{query_text}"
+
+    return await _download_and_respond(direct_url)
 
 
 if __name__ == "__main__":
