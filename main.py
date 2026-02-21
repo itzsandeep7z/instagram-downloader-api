@@ -23,7 +23,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.4"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -48,7 +48,7 @@ def _download_instagram_media(url: str) -> tuple[Path, str]:
 
     ydl_opts: dict[str, Any] = {
         "outtmpl": str(temp_dir / "%(id)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
+        "format": "best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -159,3 +159,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
