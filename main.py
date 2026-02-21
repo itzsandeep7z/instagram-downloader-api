@@ -25,7 +25,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -46,13 +46,13 @@ def _is_valid_instagram_url(url: str) -> bool:
     return bool(re.match(r"^https?://(www\.)?instagram\.com/.+", url.strip(), re.IGNORECASE))
 
 
-def _download_instagram_media(url: str) -> tuple[Path, str]:
+def _download_instagram_media(url: str) -> tuple[list[Path], str]:
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_dl_"))
 
     ydl_opts: dict[str, Any] = {
         "outtmpl": str(temp_dir / "%(id)s.%(ext)s"),
         "format": "best",
-        "noplaylist": True,
+        "noplaylist": False,
         "quiet": True,
         "no_warnings": True,
         "retries": 2,
@@ -61,26 +61,29 @@ def _download_instagram_media(url: str) -> tuple[Path, str]:
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        file_path = Path(ydl.prepare_filename(info))
+        primary_path = Path(ydl.prepare_filename(info))
 
-    if not file_path.exists():
-        candidates = list(temp_dir.glob("*"))
-        if not candidates:
+    candidates = [p for p in temp_dir.iterdir() if p.is_file()]
+    if not candidates:
+        if primary_path.exists():
+            candidates = [primary_path]
+        else:
             raise RuntimeError("Download failed: output file not found.")
-        file_path = candidates[0]
 
     title = re.sub(r"[^a-zA-Z0-9._-]+", "_", info.get("title") or "instagram_media").strip("_")
     media_id = info.get("id") or "file"
-    ext = file_path.suffix or ".mp4"
+    ext = candidates[0].suffix or ".mp4"
     download_name = f"{title}_{media_id}{ext}"
 
-    return file_path, download_name
+    return candidates, download_name
 
 
-def _zip_media(file_path: Path) -> Path:
-    zip_path = file_path.with_suffix(file_path.suffix + ".zip")
+def _zip_media(file_paths: list[Path]) -> Path:
+    first = file_paths[0]
+    zip_path = first.with_suffix(first.suffix + ".zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(file_path, arcname=file_path.name)
+        for file_path in file_paths:
+            zf.write(file_path, arcname=file_path.name)
     return zip_path
 
 
@@ -169,21 +172,22 @@ async def _download_and_respond(url: str, delivery: str | None) -> FileResponse 
         raise HTTPException(status_code=400, detail="Invalid Instagram URL.")
 
     try:
-        file_path, download_name = await asyncio.to_thread(_download_instagram_media, normalized_url)
+        file_paths, download_name = await asyncio.to_thread(_download_instagram_media, normalized_url)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Failed to download media: {exc}") from exc
 
     if delivery and delivery.lower() == "link":
-        zip_path = _zip_media(file_path)
+        zip_path = _zip_media(file_paths)
         object_name = f"instagram/{uuid.uuid4().hex}/{zip_path.name}"
         download_url, expires_in = _upload_to_r2(zip_path, object_name)
 
         try:
-            if file_path.exists():
-                os.remove(file_path)
+            for fp in file_paths:
+                if fp.exists():
+                    os.remove(fp)
             if zip_path.exists():
                 os.remove(zip_path)
-            parent = file_path.parent
+            parent = file_paths[0].parent
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception:
@@ -198,6 +202,32 @@ async def _download_and_respond(url: str, delivery: str | None) -> FileResponse 
         if expires_in:
             payload["expires_in"] = expires_in
         return JSONResponse(payload)
+
+    if len(file_paths) > 1:
+        zip_path = _zip_media(file_paths)
+
+        def _cleanup_zip() -> None:
+            try:
+                for fp in file_paths:
+                    if fp.exists():
+                        os.remove(fp)
+                if zip_path.exists():
+                    os.remove(zip_path)
+                parent = file_paths[0].parent
+                if parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except Exception:
+                pass
+
+        return FileResponse(
+            path=zip_path,
+            filename=zip_path.name,
+            media_type="application/zip",
+            headers={"X-Developer": DEVELOPER_TAG},
+            background=BackgroundTask(_cleanup_zip),
+        )
+
+    file_path = file_paths[0]
 
     def _cleanup() -> None:
         try:
