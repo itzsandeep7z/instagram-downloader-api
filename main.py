@@ -4,6 +4,8 @@ import asyncio
 import os
 import re
 import tempfile
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -23,7 +25,7 @@ else:
 
 
 APP_NAME = "Instagram Media Downloader API"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.3.0"
 DEVELOPER_TAG = "@xoxhunterxd"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -31,6 +33,7 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 class DownloadRequest(BaseModel):
     url: str = Field(..., description="Instagram reel/post URL")
+    delivery: str | None = Field(default=None, description="stream or link")
 
 
 def _normalize_instagram_input(raw_url: str) -> str:
@@ -74,10 +77,74 @@ def _download_instagram_media(url: str) -> tuple[Path, str]:
     return file_path, download_name
 
 
+def _zip_media(file_path: Path) -> Path:
+    zip_path = file_path.with_suffix(file_path.suffix + ".zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(file_path, arcname=file_path.name)
+    return zip_path
+
+
+def _get_r2_config() -> dict[str, str]:
+    endpoint = os.getenv("R2_ENDPOINT", "").strip()
+    bucket = os.getenv("R2_BUCKET", "").strip()
+    access_key = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+    secret_key = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+    public_base = os.getenv("R2_PUBLIC_BASE", "").strip()
+    ttl = os.getenv("R2_SIGNED_URL_TTL", "3600").strip()
+
+    if not (endpoint and bucket and access_key and secret_key):
+        raise HTTPException(
+            status_code=500,
+            detail="R2 storage is not configured. Set R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.",
+        )
+
+    return {
+        "endpoint": endpoint,
+        "bucket": bucket,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "public_base": public_base,
+        "ttl": ttl,
+    }
+
+
+def _upload_to_r2(file_path: Path, object_name: str) -> tuple[str, int | None]:
+    config = _get_r2_config()
+    try:
+        import boto3
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"boto3 is required for R2 uploads: {exc}") from exc
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=config["endpoint"],
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name="auto",
+    )
+
+    client.upload_file(str(file_path), config["bucket"], object_name)
+
+    if config["public_base"]:
+        base = config["public_base"].rstrip("/")
+        return f"{base}/{object_name}", None
+
+    ttl_seconds = int(config["ttl"]) if config["ttl"].isdigit() else 3600
+    signed_url = client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": config["bucket"], "Key": object_name},
+        ExpiresIn=ttl_seconds,
+    )
+    return signed_url, ttl_seconds
+
+
 @app.get("/")
-async def root(url: str | None = Query(default=None, description="Instagram reel/post URL")):
+async def root(
+    url: str | None = Query(default=None, description="Instagram reel/post URL"),
+    delivery: str | None = Query(default=None, description="stream or link"),
+):
     if url:
-        return await _download_and_respond(url)
+        return await _download_and_respond(url, delivery)
 
     return JSONResponse(
         {
@@ -89,7 +156,7 @@ async def root(url: str | None = Query(default=None, description="Instagram reel
     )
 
 
-async def _download_and_respond(url: str) -> FileResponse:
+async def _download_and_respond(url: str, delivery: str | None) -> FileResponse | JSONResponse:
     normalized_url = _normalize_instagram_input(url)
 
     if yt_dlp is None:
@@ -105,6 +172,32 @@ async def _download_and_respond(url: str) -> FileResponse:
         file_path, download_name = await asyncio.to_thread(_download_instagram_media, normalized_url)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Failed to download media: {exc}") from exc
+
+    if delivery and delivery.lower() == "link":
+        zip_path = _zip_media(file_path)
+        object_name = f"instagram/{uuid.uuid4().hex}/{zip_path.name}"
+        download_url, expires_in = _upload_to_r2(zip_path, object_name)
+
+        try:
+            if file_path.exists():
+                os.remove(file_path)
+            if zip_path.exists():
+                os.remove(zip_path)
+            parent = file_path.parent
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except Exception:
+            pass
+
+        payload = {
+            "download_url": download_url,
+            "filename": zip_path.name,
+            "delivery": "link",
+            "developer": DEVELOPER_TAG,
+        }
+        if expires_in:
+            payload["expires_in"] = expires_in
+        return JSONResponse(payload)
 
     def _cleanup() -> None:
         try:
@@ -127,12 +220,15 @@ async def _download_and_respond(url: str) -> FileResponse:
 
 @app.post("/api/v1/instagram/download")
 async def download_instagram_media_post(payload: DownloadRequest):
-    return await _download_and_respond(payload.url)
+    return await _download_and_respond(payload.url, payload.delivery)
 
 
 @app.get("/api/v1/instagram/download")
-async def download_instagram_media_get(url: str = Query(..., description="Instagram reel/post URL")):
-    return await _download_and_respond(url)
+async def download_instagram_media_get(
+    url: str = Query(..., description="Instagram reel/post URL"),
+    delivery: str | None = Query(default=None, description="stream or link"),
+):
+    return await _download_and_respond(url, delivery)
 
 
 @app.get("/health")
@@ -152,7 +248,8 @@ async def download_instagram_media_direct_path(target: str, request: Request):
     if query_text and "?" not in direct_url:
         direct_url = f"{direct_url}?{query_text}"
 
-    return await _download_and_respond(direct_url)
+    delivery = request.query_params.get("delivery")
+    return await _download_and_respond(direct_url, delivery)
 
 
 if __name__ == "__main__":

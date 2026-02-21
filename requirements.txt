@@ -1,3 +1,4 @@
-﻿fastapi
+fastapi
 uvicorn[standard]
 yt-dlp
+boto3
