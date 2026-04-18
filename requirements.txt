@@ -2,4 +2,3 @@ fastapi
 uvicorn[standard]
 yt-dlp
 boto3
-requests
